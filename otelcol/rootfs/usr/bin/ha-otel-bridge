@@ -104,12 +104,13 @@ _otel_log_handler = LoggingHandler(logger_provider=_logger_provider)
 _ha_log = logging.getLogger("ha-events")
 _ha_log.addHandler(_otel_log_handler)
 _ha_log.propagate = False
+_ha_log.setLevel(logging.DEBUG)
 
 # OTLP logger for container log streams (Task E)
 _container_log = logging.getLogger("ha-containers")
 _container_log.addHandler(_otel_log_handler)
 _container_log.propagate = False
-_container_log.setLevel(logging.DEBUG)  # otelcol filter/severity does the gating
+_container_log.setLevel(logging.DEBUG)
 
 # ── Gauge cache (D2) ──────────────────────────────────────────────────────────
 # entity_id → (ObservableGauge, last_value); we use callback-style gauges.
