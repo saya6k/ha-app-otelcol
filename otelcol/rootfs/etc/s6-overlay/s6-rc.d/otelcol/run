@@ -9,7 +9,7 @@
 
 declare raw_config log_level otlp_endpoint otlp_protocol otlp_tls_insecure
 declare exporter_name endpoint headers_yaml pipeline_exporters otelcol_log_level
-declare filter_severity debug_log_processors addon_version validation_output
+declare filter_severity debug_log_processors metrics_processors slug validation_output
 declare -a options
 
 ## Bundled self-monitoring baseline — always loaded first
@@ -29,7 +29,8 @@ else
     otlp_endpoint=$(bashio::config 'otlp_endpoint')
     otlp_protocol=$(bashio::config 'otlp_protocol')
     otlp_tls_insecure=$(bashio::config 'otlp_tls_insecure')
-    addon_version=$(bashio::addon.version)
+    # Install slug (e.g. 03f32180_otelcol) — matches the Python bridge's _SELF_SLUG.
+    slug=$(hostname | tr '-' '_')
 
     bashio::log.info 'Generating collector configuration from options...'
 
@@ -93,9 +94,16 @@ else
     esac
 
     if [[ "${filter_severity}" -gt 0 ]]; then
-        debug_log_processors="[memory_limiter, filter/severity, batch, resource]"
+        debug_log_processors="[memory_limiter, transform/semconv_logs, filter/severity, batch]"
     else
-        debug_log_processors="[memory_limiter, batch, resource]"
+        debug_log_processors="[memory_limiter, transform/semconv_logs, batch]"
+    fi
+
+    # metrics/bridge: split per-add-on service when a backend is configured.
+    if [[ -n "${otlp_endpoint}" ]]; then
+        metrics_processors="[memory_limiter, groupbyattrs/addon, transform/service_resource, batch]"
+    else
+        metrics_processors="[memory_limiter, batch]"
     fi
 
     # ── Write /tmp/otelcol-config.yaml ─────────────────────────────────────
@@ -118,11 +126,6 @@ processors:
     limit_percentage: 75
     spike_limit_percentage: 25
   batch:
-  resource:
-    attributes:
-      - action: insert
-        key: ha.addon.version
-        value: "${addon_version}"
 YAML
 
         if [[ "${filter_severity}" -gt 0 ]]; then
@@ -130,6 +133,48 @@ YAML
             printf '    logs:\n'
             printf '      log_record:\n'
             printf "        - 'severity_number < %d'\n" "${filter_severity}"
+        fi
+
+        # Semconv log-record renames — applied on both log pipelines.
+        cat <<'YAML'
+  transform/semconv_logs:
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["code.namespace"], attributes["ha.logger"]) where attributes["ha.logger"] != nil
+          - delete_key(attributes, "ha.logger")
+          - set(attributes["code.filepath"], attributes["ha.source"]) where attributes["ha.source"] != nil
+          - delete_key(attributes, "ha.source")
+          - set(attributes["ha.log.count"], attributes["ha.count"]) where attributes["ha.count"] != nil
+          - delete_key(attributes, "ha.count")
+          - set(attributes["ha.log.first_occurred"], attributes["ha.first_occurred"]) where attributes["ha.first_occurred"] != nil
+          - delete_key(attributes, "ha.first_occurred")
+YAML
+
+        # Per-service resource split — backend pipelines only.
+        if [[ -n "${otlp_endpoint}" ]]; then
+            cat <<'YAML'
+  groupbyattrs/addon:
+    keys: [addon.slug]
+  transform/service_resource:
+    log_statements:
+      - context: log
+        statements:
+          - set(resource.attributes["service.name"], resource.attributes["addon.slug"]) where resource.attributes["addon.slug"] != nil
+          - set(resource.attributes["service.name"], "homeassistant") where resource.attributes["addon.slug"] == "core"
+          - set(resource.attributes["service.name"], "supervisor") where resource.attributes["addon.slug"] == "supervisor"
+          - set(resource.attributes["service.version"], attributes["addon.version"]) where attributes["addon.version"] != nil
+          - set(resource.attributes["addon.name"], attributes["addon.name"]) where attributes["addon.name"] != nil
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.name"], attributes["addon.slug"]) where attributes["addon.slug"] != nil
+          - set(attributes["service.name"], "homeassistant") where attributes["addon.slug"] == "core"
+          - set(attributes["service.name"], "supervisor") where attributes["addon.slug"] == "supervisor"
+      - context: datapoint
+        statements:
+          - set(resource.attributes["service.version"], attributes["addon.version"]) where attributes["addon.version"] != nil
+YAML
         fi
 
         printf '\nexporters:\n'
@@ -168,26 +213,28 @@ YAML
 
 service:
   telemetry:
+    resource:
+      service.name: "${slug}"
     logs:
       level: ${otelcol_log_level}
   pipelines:
     metrics/bridge:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resource]
+      processors: ${metrics_processors}
       exporters: ${pipeline_exporters}
 YAML
 
-        # logs/bridge: unfiltered, OTLP backend only (omitted when no endpoint)
+        # logs/bridge: per-service split, OTLP backend only (omitted when no endpoint)
         if [[ -n "${otlp_endpoint}" ]]; then
             cat <<YAML
     logs/bridge:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resource]
+      processors: [memory_limiter, transform/semconv_logs, groupbyattrs/addon, transform/service_resource, batch]
       exporters: [${exporter_name}]
 YAML
         fi
 
-        # logs/debug: filtered by log_level, debug exporter only
+        # logs/debug: semconv renames + severity filter, debug exporter only
         cat <<YAML
     logs/debug:
       receivers: [otlp]
@@ -198,7 +245,7 @@ YAML
         cat <<YAML
     traces/bridge:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resource]
+      processors: [memory_limiter, batch]
       exporters: ${pipeline_exporters}
 YAML
 

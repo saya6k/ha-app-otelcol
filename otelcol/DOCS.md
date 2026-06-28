@@ -57,6 +57,33 @@ The Python bridge (`ha-otel-bridge`) connects to HA's WebSocket API, subscribes 
 events above, and pushes everything as OTLP to the local collector on `localhost:4318`.
 No Docker socket access or custom component required.
 
+## How telemetry is attributed (`service.name`)
+
+Each signal is attributed to the component that produced it, following
+OpenTelemetry semantic conventions. When an OTLP backend is configured:
+
+| Source | `service.name` |
+|---|---|
+| Home Assistant Core (entity metrics, event traces, Core logs, `system_log_event`) | `homeassistant` |
+| Each add-on's container logs and CPU/memory stats | the add-on slug (e.g. `d5369777_music_assistant`) |
+| Supervisor logs and stats | `supervisor` |
+| This add-on (its own stats, bridge health) | its install slug (e.g. `03f32180_otelcol`) |
+
+`service.version` carries the producing add-on's version where available, and all
+HA-origin signals share `service.namespace=home-assistant`. The
+`supervisor.addon.*` gauges keep their per-add-on dimension as the `service.name`
+label, so you can still compare add-ons fleet-wide by grouping on `service_name`.
+
+Structured-log attributes follow semconv: `code.namespace` (logger) and
+`code.filepath` (source). Externally-instrumented add-ons that send OTLP to this
+collector keep their own `service.name` untouched.
+
+> **Migration:** earlier versions tagged everything as `service.name=ha-otel-bridge`
+> with a global `ha.addon.version`. Both are gone — query per-source `service.name`
+> (or `service.namespace="home-assistant"` for all HA sources) and `service.version`.
+> Standard otelcol collector dashboards keyed on `service.name=otelcol-contrib`
+> should point at this add-on's install slug instead.
+
 ## Options
 
 | Option | Default | Description |
@@ -91,11 +118,12 @@ harmless — the bridge receives no `system_log_event` messages.
 
 When enabled, the bridge enumerates all add-ons via the Supervisor API and
 streams logs + polls CPU/memory stats for each one (plus the Supervisor and HA
-Core). Data is tagged with `addon.slug` and `addon.name`.
+Core). Each add-on's logs and stats are attributed to its own `service.name`
+(see [How telemetry is attributed](#how-telemetry-is-attributed-servicename)).
 
-- **Logs** appear as OTLP log records in the `ha-containers` source.
+- **Logs** appear as OTLP log records under the add-on's `service.name`.
 - **CPU%** / **memory%** appear as `supervisor.addon.cpu_percent` /
-  `supervisor.addon.memory_percent` gauges keyed by `addon.slug`.
+  `supervisor.addon.memory_percent` gauges, one `service.name` per add-on.
 
 No Docker socket access is required. Protection mode stays ON. New add-ons are
 picked up automatically within 5 minutes.
