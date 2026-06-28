@@ -432,6 +432,17 @@ def _emit_span(
         processor.on_end(span)
 
 
+def _diff_log_lines(old: list[str], new: list[str]) -> list[str]:
+    """Return lines from new that appear after the last overlap with old."""
+    if not old:
+        return new
+    last = old[-1]
+    for i in range(len(new) - 1, -1, -1):
+        if new[i] == last:
+            return new[i + 1:]
+    return new
+
+
 # ── Container monitor (E) ─────────────────────────────────────────────────────
 
 class ContainerMonitor:
@@ -534,8 +545,12 @@ class ContainerMonitor:
                     if resp.status == 404:
                         log.debug("No log endpoint for %s (404) — skipping", slug)
                         return
+                    if resp.status == 400:
+                        log.debug("Log stream %s: /follow unavailable (no journald) — polling /logs", slug)
+                        await self._poll_logs(session, headers, slug, name, url.split("/follow")[0])
+                        return
                     if resp.status != 200:
-                        log.warning("Log stream %s: HTTP %d", slug, resp.status)
+                        log.debug("Log stream %s: HTTP %d", slug, resp.status)
                         await asyncio.sleep(LOG_RECONNECT_DELAY)
                         continue
                     async for raw_line in resp.content:
@@ -549,6 +564,40 @@ class ContainerMonitor:
             except Exception as exc:
                 log.debug("Log stream %s interrupted: %s", slug, exc)
             await asyncio.sleep(LOG_RECONNECT_DELAY)
+
+    async def _poll_logs(
+        self,
+        session: aiohttp.ClientSession,
+        headers: dict,
+        slug: str,
+        name: str,
+        url: str,
+    ) -> None:
+        """Poll /logs for add-ons that don't support /logs/follow (no journald)."""
+        extra = {"addon.slug": slug, "addon.name": name}
+        last_lines: list[str] = []
+        while True:
+            try:
+                async with session.get(
+                    f"{url}?lines=200",
+                    headers={**headers, "Accept": "text/plain"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 404:
+                        return
+                    if resp.status == 200:
+                        text = await resp.text(errors="replace")
+                        current = [l.rstrip() for l in text.splitlines() if l.rstrip()]
+                        for line in _diff_log_lines(last_lines, current):
+                            m = _HA_LOG_RE.match(line)
+                            lvl = SEVERITY_MAP.get(m.group(1).upper(), logging.INFO) if m else logging.INFO
+                            _container_log.log(lvl, line, extra=extra)
+                        last_lines = current
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                log.debug("Poll logs %s error: %s", slug, exc)
+            await asyncio.sleep(STATS_INTERVAL)
 
     async def _poll_stats(
         self,
