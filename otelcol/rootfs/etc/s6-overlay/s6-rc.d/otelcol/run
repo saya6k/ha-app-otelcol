@@ -129,8 +129,7 @@ YAML
             printf '  filter/severity:\n'
             printf '    logs:\n'
             printf '      log_record:\n'
-            # severity_number == 0 means UNSPECIFIED — let those through.
-            printf "        - 'severity_number > 0 and severity_number < %d'\n" "${filter_severity}"
+            printf "        - 'severity_number < %d'\n" "${filter_severity}"
         fi
 
         printf '\nexporters:\n'
