@@ -1,3 +1,4 @@
+---
 # Bundled baseline config — always loaded.
 # User config (raw_config or generated) is layered on top.
 # When both define the same pipeline, otelcol merges them.
