@@ -1,0 +1,50 @@
+---
+name: Upstream check
+
+# yamllint disable-line rule:truthy
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    name: Check otelcol-contrib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for new release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LATEST=$(gh release list \
+            --repo open-telemetry/opentelemetry-collector-contrib \
+            --limit 1 --json tagName --jq '.[0].tagName | ltrimstr("v")')
+          CURRENT=$(grep 'opentelemetry-collector-contrib:' otelcol/Dockerfile \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "Latest : $LATEST"
+          echo "Current: $CURRENT"
+          [ "$LATEST" = "$CURRENT" ] && echo "Up to date." && exit 0
+
+          gh pr list --head "upstream/otelcol-${LATEST}" --json number --jq 'length' \
+            | grep -qv '^0$' && echo "PR already open." && exit 0
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "upstream/otelcol-${LATEST}"
+          sed -i "s|opentelemetry-collector-contrib:${CURRENT}|opentelemetry-collector-contrib:${LATEST}|g" \
+            otelcol/Dockerfile
+          git add otelcol/Dockerfile
+          git commit -m "chore: bump otelcol-contrib ${CURRENT} → ${LATEST}"
+          git push origin "upstream/otelcol-${LATEST}"
+          gh pr create \
+            --base main --head "upstream/otelcol-${LATEST}" \
+            --title "chore: bump otelcol-contrib ${CURRENT} → ${LATEST}" \
+            --body "$(printf '## Upstream update\n\n[otelcol-contrib v%s](https://github.com/open-telemetry/opentelemetry-collector-contrib/releases/tag/v%s) released.\n\n> Verify config format compatibility before merging.' "${LATEST}" "${LATEST}")" \
+            --assignee saya6k
