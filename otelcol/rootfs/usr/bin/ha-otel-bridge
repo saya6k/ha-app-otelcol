@@ -46,6 +46,7 @@ HA_REST_URL = "http://supervisor/core/api"
 HA_METRICS_ENABLED = os.environ.get("HA_METRICS_ENABLED", "true").lower() == "true"
 HA_EVENTS_ENABLED = os.environ.get("HA_EVENTS_ENABLED", "true").lower() == "true"
 HA_TRACES_ENABLED = os.environ.get("HA_TRACES_ENABLED", "true").lower() == "true"
+HA_LOGS_ENABLED = os.environ.get("HA_LOGS_ENABLED", "true").lower() == "true"
 CONTAINER_LOGS_ENABLED = os.environ.get("CONTAINER_LOGS_ENABLED", "false").lower() == "true"
 
 SUPERVISOR_BASE_URL = "http://supervisor"
@@ -432,12 +433,17 @@ class ContainerMonitor:
         self._log_tasks: dict[str, asyncio.Task] = {}
         self._stat_tasks: dict[str, asyncio.Task] = {}
 
-    async def run(self, session: aiohttp.ClientSession) -> None:
+    async def run(
+        self,
+        session: aiohttp.ClientSession,
+        include_core: bool,
+        include_addons: bool,
+    ) -> None:
         """Enumerate services every 5 min; start log/stats tasks for each."""
         headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
         while True:
             try:
-                services = await self._enumerate_services(session, headers)
+                services = await self._enumerate_services(session, headers, include_core, include_addons)
                 for slug, name, log_url, stats_url in services:
                     # Skip own log stream — reading our own otelcol output
                     # through the debug exporter creates a feedback loop.
@@ -459,36 +465,45 @@ class ContainerMonitor:
         self,
         session: aiohttp.ClientSession,
         headers: dict,
+        include_core: bool,
+        include_addons: bool,
     ) -> list[tuple[str, str, str, str]]:
-        """Return (slug, name, log_url, stats_url) for supervisor, core, and all add-ons."""
-        services: list[tuple[str, str, str, str]] = [
-            ("supervisor", "Supervisor",
-             f"{SUPERVISOR_BASE_URL}/supervisor/logs/follow?lines=100",
-             f"{SUPERVISOR_BASE_URL}/supervisor/stats"),
-            ("core", "Home Assistant Core",
-             f"{SUPERVISOR_BASE_URL}/core/logs/follow?lines=100",
-             f"{SUPERVISOR_BASE_URL}/core/stats"),
-        ]
-        try:
-            async with session.get(
-                f"{SUPERVISOR_BASE_URL}/addons", headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    for addon in data.get("data", {}).get("addons", []):
-                        slug = addon.get("slug", "")
-                        name = addon.get("name", slug)
-                        if slug:
-                            services.append((
-                                slug, name,
-                                f"{SUPERVISOR_BASE_URL}/addons/{slug}/logs/follow?lines=100",
-                                f"{SUPERVISOR_BASE_URL}/addons/{slug}/stats",
-                            ))
-                else:
-                    log.warning("GET /addons returned HTTP %d", resp.status)
-        except Exception as exc:
-            log.warning("Failed to enumerate add-ons: %s", exc)
+        """Return (slug, name, log_url, stats_url) for the requested service groups.
+
+        include_core:   HA Core + Supervisor (the two non-add-on system endpoints).
+        include_addons: All add-ons regardless of slug prefix (core_*, store_*, etc.).
+        """
+        services: list[tuple[str, str, str, str]] = []
+        if include_core:
+            services.extend([
+                ("core", "Home Assistant Core",
+                 f"{SUPERVISOR_BASE_URL}/core/logs/follow?lines=100",
+                 f"{SUPERVISOR_BASE_URL}/core/stats"),
+                ("supervisor", "Supervisor",
+                 f"{SUPERVISOR_BASE_URL}/supervisor/logs/follow?lines=100",
+                 f"{SUPERVISOR_BASE_URL}/supervisor/stats"),
+            ])
+        if include_addons:
+            try:
+                async with session.get(
+                    f"{SUPERVISOR_BASE_URL}/addons", headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for addon in data.get("data", {}).get("addons", []):
+                            slug = addon.get("slug", "")
+                            name = addon.get("name", slug)
+                            if slug:
+                                services.append((
+                                    slug, name,
+                                    f"{SUPERVISOR_BASE_URL}/addons/{slug}/logs/follow?lines=100",
+                                    f"{SUPERVISOR_BASE_URL}/addons/{slug}/stats",
+                                ))
+                    else:
+                        log.warning("GET /addons returned HTTP %d", resp.status)
+            except Exception as exc:
+                log.warning("Failed to enumerate add-ons: %s", exc)
         return services
 
     async def _follow_logs(
@@ -705,9 +720,16 @@ async def run() -> None:
         connector = aiohttp.TCPConnector()
 
     async with aiohttp.ClientSession(connector=connector) as session:
-        if CONTAINER_LOGS_ENABLED:
-            log.info("Container monitoring enabled — starting Supervisor API monitor")
-            asyncio.create_task(_container_monitor.run(session))
+        if HA_LOGS_ENABLED or CONTAINER_LOGS_ENABLED:
+            log.info(
+                "Log monitoring: ha_core=%s container=%s",
+                HA_LOGS_ENABLED, CONTAINER_LOGS_ENABLED,
+            )
+            asyncio.create_task(_container_monitor.run(
+                session,
+                include_core=HA_LOGS_ENABLED,
+                include_addons=CONTAINER_LOGS_ENABLED,
+            ))
 
         while True:
             try:
