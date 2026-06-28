@@ -8,7 +8,7 @@
 # ==============================================================================
 
 declare raw_config log_level otlp_endpoint otlp_protocol otlp_tls_insecure
-declare exporter_name endpoint headers_yaml pipeline_exporters
+declare exporter_name endpoint headers_yaml pipeline_exporters otelcol_log_level
 declare addon_version validation_output
 declare -a options
 declare ha_logs_enabled
@@ -165,9 +165,23 @@ YAML
             printf '  debug:\n    verbosity: normal\n'
         fi
 
+        # Map HA log_level → otelcol telemetry log level
+        # HA:     trace debug info notice warning error fatal
+        # otelcol:      debug info        warn   error
+        case "${log_level}" in
+            trace|debug) otelcol_log_level="debug" ;;
+            info|notice) otelcol_log_level="info"  ;;
+            warning)     otelcol_log_level="warn"  ;;
+            error|fatal) otelcol_log_level="error" ;;
+            *)           otelcol_log_level="info"  ;;
+        esac
+
         cat <<YAML
 
 service:
+  telemetry:
+    logs:
+      level: ${otelcol_log_level}
   pipelines:
     metrics/bridge:
       receivers: [otlp]
