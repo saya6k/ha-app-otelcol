@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
 import time
 from collections import OrderedDict
@@ -772,70 +773,84 @@ async def run() -> None:
         log.error("SUPERVISOR_TOKEN is not set — cannot connect to HA")
         raise SystemExit(1)
 
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    loop.add_signal_handler(signal.SIGTERM, current.cancel)
+
     backoff = RECONNECT_BASE
     try:
         connector = aiohttp.TCPConnector(resolver=aiohttp.AsyncResolver())
     except RuntimeError:
         connector = aiohttp.TCPConnector()
 
-    async with aiohttp.ClientSession(connector=connector) as session:
-        if HA_LOGS_ENABLED or CONTAINER_LOGS_ENABLED:
-            log.info(
-                "Log monitoring: ha_core=%s container=%s",
-                HA_LOGS_ENABLED, CONTAINER_LOGS_ENABLED,
-            )
-            asyncio.create_task(_container_monitor.run(
-                session,
-                include_core=HA_LOGS_ENABLED,
-                include_addons=CONTAINER_LOGS_ENABLED,
-            ))
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            if HA_LOGS_ENABLED or CONTAINER_LOGS_ENABLED:
+                log.info(
+                    "Log monitoring: ha_core=%s container=%s",
+                    HA_LOGS_ENABLED, CONTAINER_LOGS_ENABLED,
+                )
+                asyncio.create_task(_container_monitor.run(
+                    session,
+                    include_core=HA_LOGS_ENABLED,
+                    include_addons=CONTAINER_LOGS_ENABLED,
+                ))
 
-        while True:
-            try:
-                log.info("Connecting to HA WebSocket: %s", HA_WS_URL)
-                async with session.ws_connect(
-                    HA_WS_URL,
-                    headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
-                    heartbeat=30,
-                ) as ws:
-                    if not await _authenticate(ws):
-                        raise RuntimeError("Authentication failed")
+            while True:
+                try:
+                    log.info("Connecting to HA WebSocket: %s", HA_WS_URL)
+                    async with session.ws_connect(
+                        HA_WS_URL,
+                        headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
+                        heartbeat=30,
+                    ) as ws:
+                        if not await _authenticate(ws):
+                            raise RuntimeError("Authentication failed")
 
-                    await _seed_states(session)
+                        await _seed_states(session)
 
-                    msg_id = 1
-                    if HA_METRICS_ENABLED or HA_TRACES_ENABLED:
-                        await _subscribe(ws, msg_id, "state_changed")
-                        msg_id += 1
-                    if HA_EVENTS_ENABLED:
-                        await _subscribe(ws, msg_id, "system_log_event")
-                        msg_id += 1
-                    if HA_TRACES_ENABLED:
-                        for etype in ("call_service", "automation_triggered",
-                                      "script_started", "timer_finished"):
-                            await _subscribe(ws, msg_id, etype)
+                        msg_id = 1
+                        if HA_METRICS_ENABLED or HA_TRACES_ENABLED:
+                            await _subscribe(ws, msg_id, "state_changed")
                             msg_id += 1
-                    if HA_TRACES_ENABLED or HA_EVENTS_ENABLED:
-                        for etype in (
-                            "homeassistant_start", "homeassistant_stop",
-                            "component_loaded",
-                            "persistent_notifications_updated",
-                            "device_registry_updated",
-                        ):
-                            await _subscribe(ws, msg_id, etype)
+                        if HA_EVENTS_ENABLED:
+                            await _subscribe(ws, msg_id, "system_log_event")
                             msg_id += 1
+                        if HA_TRACES_ENABLED:
+                            for etype in ("call_service", "automation_triggered",
+                                          "script_started", "timer_finished"):
+                                await _subscribe(ws, msg_id, etype)
+                                msg_id += 1
+                        if HA_TRACES_ENABLED or HA_EVENTS_ENABLED:
+                            for etype in (
+                                "homeassistant_start", "homeassistant_stop",
+                                "component_loaded",
+                                "persistent_notifications_updated",
+                                "device_registry_updated",
+                            ):
+                                await _subscribe(ws, msg_id, etype)
+                                msg_id += 1
 
-                    log.info("Bridge running")
-                    backoff = RECONNECT_BASE  # reset on successful connect
-                    await _event_loop(ws)
+                        log.info("Bridge running")
+                        backoff = RECONNECT_BASE  # reset on successful connect
+                        await _event_loop(ws)
 
-            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
-                log.warning("Connection lost (%s); reconnecting in %ds", exc, backoff)
-            except Exception as exc:
-                log.error("Unexpected error: %s", exc, exc_info=True)
+                except asyncio.CancelledError:
+                    raise
+                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                    log.warning("Connection lost (%s); reconnecting in %ds", exc, backoff)
+                except Exception as exc:
+                    log.error("Unexpected error: %s", exc, exc_info=True)
 
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, RECONNECT_MAX)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, RECONNECT_MAX)
+
+    except asyncio.CancelledError:
+        log.info("Shutting down (SIGTERM)")
+    finally:
+        _logger_provider.shutdown()
+        _tracer_provider.shutdown()
+        _meter_provider.shutdown()
 
 
 if __name__ == "__main__":
