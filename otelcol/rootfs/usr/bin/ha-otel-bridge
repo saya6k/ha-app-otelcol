@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
 import time
 from collections import OrderedDict
@@ -107,6 +108,7 @@ _ha_log.propagate = False
 _container_log = logging.getLogger("ha-containers")
 _container_log.addHandler(_otel_log_handler)
 _container_log.propagate = False
+_container_log.setLevel(logging.DEBUG)  # otelcol filter/severity does the gating
 
 # ── Gauge cache (D2) ──────────────────────────────────────────────────────────
 # entity_id → (ObservableGauge, last_value); we use callback-style gauges.
@@ -281,13 +283,19 @@ _NUMERIC_DOMAINS = {
 }
 
 SEVERITY_MAP = {
+    "TRACE": logging.DEBUG,
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
+    "NOTICE": logging.INFO,
     "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,
     "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,
     "FATAL": logging.CRITICAL,
 }
+
+# Matches HA Core / Supervisor log lines: "YYYY-MM-DD HH:MM:SS.mmm LEVEL ..."
+_HA_LOG_RE = re.compile(r"^\d{4}-\d{2}-\d{2} [\d:.,]+ (\w+)")
 
 
 def _try_float(value: str) -> float | None:
@@ -533,7 +541,9 @@ class ContainerMonitor:
                     async for raw_line in resp.content:
                         line = raw_line.decode(errors="replace").rstrip()
                         if line:
-                            _container_log.info(line, extra=extra)
+                            m = _HA_LOG_RE.match(line)
+                            lvl = SEVERITY_MAP.get(m.group(1).upper(), logging.INFO) if m else logging.INFO
+                            _container_log.log(lvl, line, extra=extra)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
