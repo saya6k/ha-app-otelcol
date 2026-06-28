@@ -19,12 +19,15 @@ capture) and [cedricziel/otelcol](https://github.com/cedricziel/ha-addons/tree/m
 (collector packaging) into a single turn-key add-on. See `SPEC.md` for
 the full design.
 
-## Git / repo tracking
+## Repo structure
 
-Part of the `ha-apps` monorepo. Registered in `.gitignore` (`!/otelcol/`),
-release-please config, CI, labeler, and issue templates — fully tracked.
+Standalone repo — source, CI, and releases live here.
+`ha-apps` references the published GHCR image via `image: ghcr.io/saya6k/app-otelcol`.
 
-**Stage:** stable (no `stage:` key in `config.yaml`).
+**Stage:** stable (no `stage:` key in `config.yaml`). `stage: experimental` was
+removed when the repo was migrated out of ha-apps.
+
+Release flow: push to `main` → release-drafter drafts the next patch version → publish the draft → `build.yml` pushes multi-arch GHCR images → `repository_dispatch` to ha-apps auto-updates `config.yaml`.
 
 ## Layout
 
