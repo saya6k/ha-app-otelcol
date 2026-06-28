@@ -1,0 +1,58 @@
+#include <tunables/global>
+
+profile hassio_otelcol flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # Capabilities
+  file,
+  signal (send) set=(kill,term,int,hup,cont),
+
+  # S6-Overlay (official HA example pattern)
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/ rwk,
+  /run/** rwk,
+  /dev/tty rw,
+
+  # Bashio
+  /usr/lib/bashio/** ix,
+  /tmp/ rwk,
+  /tmp/** rwk,
+
+  # otelcol-contrib binary
+  /usr/bin/otelcol-contrib ix,
+
+  # Python bridge venv (/opt/bridge-venv — non-standard path, not covered by abstractions)
+  /opt/bridge-venv/bin/python3* ix,
+
+  # HA add-on data and mounts
+  /data/ rw,
+  /data/** rw,
+  /config/ rw,
+  /config/** rw,
+  /ssl/ rw,
+  /ssl/** rw,
+  /share/ rw,
+  /share/** rw,
+  /addon_config/ rw,
+  /addon_config/** rw,
+
+  # Deny Docker socket — Supervisor API is used instead
+  deny /var/run/docker.sock rwklx,
+  deny /run/docker.sock rwklx,
+
+  # Network (OTLP export, DNS, HA API)
+  network inet  stream,
+  network inet  dgram,
+  network inet6 stream,
+  network inet6 dgram,
+  network unix  stream,
+  network unix  dgram,
+}
