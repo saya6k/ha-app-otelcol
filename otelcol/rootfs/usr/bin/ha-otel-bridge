@@ -77,7 +77,10 @@ log = logging.getLogger("ha-bridge")
 
 # ── OTLP providers ────────────────────────────────────────────────────────────
 
-_resource = Resource.create({"service.name": "ha-otel-bridge"})
+_resource = Resource.create({
+    "service.name": "homeassistant",
+    "service.namespace": "home-assistant",
+})
 
 _metric_reader = PeriodicExportingMetricReader(
     OTLPMetricExporter(endpoint=f"{OTLP_ENDPOINT}/v1/metrics"),
@@ -163,16 +166,26 @@ def _upsert_gauge(entity_id: str, value: float, attrs: dict[str, str]) -> None:
 # Keyed by slug (add-on slug, "supervisor", or "core"); updated by ContainerMonitor.
 _container_cpu: dict[str, float] = {}
 _container_mem: dict[str, float] = {}
+# slug → add-on version; populated by ContainerMonitor._enumerate_services.
+_addon_versions: dict[str, str] = {}
+
+
+def _stat_attrs(slug: str) -> dict[str, str]:
+    attrs = {"addon.slug": slug}
+    version = _addon_versions.get(slug)
+    if version:
+        attrs["addon.version"] = version
+    return attrs
 
 
 def _container_cpu_callback(options: Any):
     for slug, value in _container_cpu.items():
-        yield Observation(value, {"addon.slug": slug})
+        yield Observation(value, _stat_attrs(slug))
 
 
 def _container_mem_callback(options: Any):
     for slug, value in _container_mem.items():
-        yield Observation(value, {"addon.slug": slug})
+        yield Observation(value, _stat_attrs(slug))
 
 
 _meter.create_observable_gauge(
@@ -215,7 +228,7 @@ _event_counter = _meter.create_counter(
 # ── Bridge health: open context LRU entries ───────────────────────────────────
 # _ctx_graph is defined below; callback is called lazily at export time.
 def _context_lru_size_callback(options: Any):
-    yield Observation(len(_ctx_graph._store))
+    yield Observation(len(_ctx_graph._store), {"addon.slug": _SELF_SLUG})
 
 
 _meter.create_observable_gauge(
@@ -337,6 +350,7 @@ def handle_system_log_event(event_data: dict) -> None:
     source = event_data.get("source", ["", ""])[0] if event_data.get("source") else ""
     logger_name = event_data.get("name", "homeassistant")
     extra = {
+        "addon.slug": "core",
         "ha.logger": logger_name,
         "ha.source": source,
         "ha.count": event_data.get("count", 1),
@@ -465,14 +479,14 @@ class ContainerMonitor:
         while True:
             try:
                 services = await self._enumerate_services(session, headers, include_core, include_addons)
-                for slug, name, log_url, stats_url in services:
+                for slug, name, version, log_url, stats_url in services:
                     # Skip own log stream — reading our own otelcol output
                     # through the debug exporter creates a feedback loop.
                     if slug != _SELF_SLUG and (
                         slug not in self._log_tasks or self._log_tasks[slug].done()
                     ):
                         self._log_tasks[slug] = asyncio.create_task(
-                            self._follow_logs(session, headers, slug, name, log_url)
+                            self._follow_logs(session, headers, slug, name, version, log_url)
                         )
                     if slug not in self._stat_tasks or self._stat_tasks[slug].done():
                         self._stat_tasks[slug] = asyncio.create_task(
@@ -488,19 +502,23 @@ class ContainerMonitor:
         headers: dict,
         include_core: bool,
         include_addons: bool,
-    ) -> list[tuple[str, str, str, str]]:
-        """Return (slug, name, log_url, stats_url) for the requested service groups.
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Return (slug, name, version, log_url, stats_url) per service group.
 
         include_core:   HA Core + Supervisor (the two non-add-on system endpoints).
         include_addons: All add-ons regardless of slug prefix (core_*, store_*, etc.).
+
+        Also populates _addon_versions[slug] so the stats callbacks can tag
+        datapoints with addon.version. Core/Supervisor versions are not fetched
+        (no cheap endpoint) — their version is left empty.
         """
-        services: list[tuple[str, str, str, str]] = []
+        services: list[tuple[str, str, str, str, str]] = []
         if include_core:
             services.extend([
-                ("core", "Home Assistant Core",
+                ("core", "Home Assistant Core", "",
                  f"{SUPERVISOR_BASE_URL}/core/logs/follow?lines=100",
                  f"{SUPERVISOR_BASE_URL}/core/stats"),
-                ("supervisor", "Supervisor",
+                ("supervisor", "Supervisor", "",
                  f"{SUPERVISOR_BASE_URL}/supervisor/logs/follow?lines=100",
                  f"{SUPERVISOR_BASE_URL}/supervisor/stats"),
             ])
@@ -515,9 +533,11 @@ class ContainerMonitor:
                         for addon in data.get("data", {}).get("addons", []):
                             slug = addon.get("slug", "")
                             name = addon.get("name", slug)
+                            version = addon.get("version", "") or ""
                             if slug:
+                                _addon_versions[slug] = version
                                 services.append((
-                                    slug, name,
+                                    slug, name, version,
                                     f"{SUPERVISOR_BASE_URL}/addons/{slug}/logs/follow?lines=100",
                                     f"{SUPERVISOR_BASE_URL}/addons/{slug}/stats",
                                 ))
@@ -533,10 +553,13 @@ class ContainerMonitor:
         headers: dict,
         slug: str,
         name: str,
+        version: str,
         url: str,
     ) -> None:
         """Stream plain-text log lines from a Supervisor API log endpoint."""
         extra = {"addon.slug": slug, "addon.name": name}
+        if version:
+            extra["addon.version"] = version
         while True:
             try:
                 async with session.get(
@@ -549,7 +572,7 @@ class ContainerMonitor:
                         return
                     if resp.status == 400:
                         log.debug("Log stream %s: /follow unavailable (no journald) — polling /logs", slug)
-                        await self._poll_logs(session, headers, slug, name, url.split("/follow")[0])
+                        await self._poll_logs(session, headers, slug, name, version, url.split("/follow")[0])
                         return
                     if resp.status != 200:
                         log.debug("Log stream %s: HTTP %d", slug, resp.status)
@@ -573,10 +596,13 @@ class ContainerMonitor:
         headers: dict,
         slug: str,
         name: str,
+        version: str,
         url: str,
     ) -> None:
         """Poll /logs for add-ons that don't support /logs/follow (no journald)."""
         extra = {"addon.slug": slug, "addon.name": name}
+        if version:
+            extra["addon.version"] = version
         last_lines: list[str] = []
         while True:
             try:
@@ -677,7 +703,7 @@ def handle_lifecycle_log(event_type: str, event_data: dict) -> None:
         )
     else:
         message = event_type
-    extra: dict[str, str] = {"ha.event_type": event_type}
+    extra: dict[str, str] = {"addon.slug": "core", "ha.event_type": event_type}
     for key in ("component", "notification_id", "action", "device_id"):
         val = event_data.get(key)
         if val is not None:
