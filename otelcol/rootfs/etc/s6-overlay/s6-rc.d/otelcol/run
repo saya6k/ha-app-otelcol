@@ -9,7 +9,7 @@
 
 declare raw_config log_level otlp_endpoint otlp_protocol otlp_tls_insecure
 declare exporter_name endpoint headers_yaml pipeline_exporters otelcol_log_level
-declare addon_version validation_output
+declare filter_severity log_processors addon_version validation_output
 declare -a options
 
 ## Bundled self-monitoring baseline — always loaded first
@@ -76,6 +76,26 @@ else
         bashio::log.warning 'host_metrics_enabled is not yet implemented; ignored'
     fi
 
+    # ── Log record severity filter ─────────────────────────────────────────
+    # Map HA log_level → minimum OTLP severity_number for log record filtering.
+    # OTLP ranges: TRACE=1-4, DEBUG=5-8, INFO=9-12, WARN=13-16, ERROR=17-20, FATAL=21-24
+    # 0 means no filter.
+    case "${log_level}" in
+        trace)           filter_severity=0  ;;
+        debug)           filter_severity=5  ;;
+        info|notice)     filter_severity=9  ;;
+        warning)         filter_severity=13 ;;
+        error)           filter_severity=17 ;;
+        fatal)           filter_severity=21 ;;
+        *)               filter_severity=9  ;;
+    esac
+
+    if [[ "${filter_severity}" -gt 0 ]]; then
+        log_processors="[memory_limiter, filter/severity, batch, resource]"
+    else
+        log_processors="[memory_limiter, batch, resource]"
+    fi
+
     # ── Write /tmp/otelcol-config.yaml ─────────────────────────────────────
     {
         cat <<YAML
@@ -101,9 +121,19 @@ processors:
       - action: insert
         key: ha.addon.version
         value: "${addon_version}"
-
-exporters:
 YAML
+
+        # Severity filter processor (drops log records below the configured level)
+        if [[ "${filter_severity}" -gt 0 ]]; then
+            printf '  filter/severity:\n'
+            printf '    logs:\n'
+            printf '      log_record:\n'
+            # Drop records with a known severity below the configured threshold.
+            # severity_number == 0 means UNSPECIFIED — let those through.
+            printf "        - 'severity_number > 0 and severity_number < %d'\n" "${filter_severity}"
+        fi
+
+        printf '\nexporters:\n'
 
         # OTLP exporter (only when endpoint is configured)
         if [[ -n "${otlp_endpoint}" ]]; then
@@ -148,7 +178,7 @@ service:
       exporters: ${pipeline_exporters}
     logs/bridge:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resource]
+      processors: ${log_processors}
       exporters: ${pipeline_exporters}
     traces/bridge:
       receivers: [otlp]
