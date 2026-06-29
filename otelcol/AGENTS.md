@@ -95,7 +95,7 @@ map:
 
 ## otelcol-contrib pin
 
-Binary pinned to `0.154.0` via per-arch upstream tags (`-amd64` /
+Binary pinned to `0.155.0` via per-arch upstream tags (`-amd64` /
 `-arm64`). Bump the pin explicitly in CHANGELOG; test the config merge
 + health check before merging. Upstream releases are frequent (multiple
 per month) — we do NOT track `@latest`.
