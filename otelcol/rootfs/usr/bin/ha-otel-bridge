@@ -53,10 +53,10 @@ CONTAINER_LOGS_ENABLED = os.environ.get("CONTAINER_LOGS_ENABLED", "false").lower
 
 SUPERVISOR_BASE_URL = "http://supervisor"
 STATS_INTERVAL = 30       # seconds between stats polls
-LOG_RECONNECT_DELAY = 5   # seconds before reconnecting a dropped log stream
+LOG_POLL_INTERVAL = 15    # seconds between log polls per service
 
 # Supervisor slug for this add-on: hostname uses hyphens, Supervisor uses underscores.
-# Skipping our own slug in _follow_logs prevents a debug-exporter feedback loop.
+# Skipping our own slug when polling logs prevents a debug-exporter feedback loop.
 _SELF_SLUG = socket.gethostname().replace("-", "_")
 
 # Reconnect backoff: start at 2 s, cap at 60 s
@@ -480,13 +480,13 @@ class ContainerMonitor:
             try:
                 services = await self._enumerate_services(session, headers, include_core, include_addons)
                 for slug, name, version, log_url, stats_url in services:
-                    # Skip own log stream — reading our own otelcol output
-                    # through the debug exporter creates a feedback loop.
+                    # Skip our own logs — reading our otelcol output back through
+                    # the debug exporter creates a feedback loop.
                     if slug != _SELF_SLUG and (
                         slug not in self._log_tasks or self._log_tasks[slug].done()
                     ):
                         self._log_tasks[slug] = asyncio.create_task(
-                            self._follow_logs(session, headers, slug, name, version, log_url)
+                            self._poll_logs(session, headers, slug, name, version, log_url)
                         )
                     if slug not in self._stat_tasks or self._stat_tasks[slug].done():
                         self._stat_tasks[slug] = asyncio.create_task(
@@ -516,10 +516,10 @@ class ContainerMonitor:
         if include_core:
             services.extend([
                 ("core", "Home Assistant Core", "",
-                 f"{SUPERVISOR_BASE_URL}/core/logs/follow?lines=100",
+                 f"{SUPERVISOR_BASE_URL}/core/logs",
                  f"{SUPERVISOR_BASE_URL}/core/stats"),
                 ("supervisor", "Supervisor", "",
-                 f"{SUPERVISOR_BASE_URL}/supervisor/logs/follow?lines=100",
+                 f"{SUPERVISOR_BASE_URL}/supervisor/logs",
                  f"{SUPERVISOR_BASE_URL}/supervisor/stats"),
             ])
         if include_addons:
@@ -538,7 +538,7 @@ class ContainerMonitor:
                                 _addon_versions[slug] = version
                                 services.append((
                                     slug, name, version,
-                                    f"{SUPERVISOR_BASE_URL}/addons/{slug}/logs/follow?lines=100",
+                                    f"{SUPERVISOR_BASE_URL}/addons/{slug}/logs",
                                     f"{SUPERVISOR_BASE_URL}/addons/{slug}/stats",
                                 ))
                     else:
@@ -546,49 +546,6 @@ class ContainerMonitor:
             except Exception as exc:
                 log.warning("Failed to enumerate add-ons: %s", exc)
         return services
-
-    async def _follow_logs(
-        self,
-        session: aiohttp.ClientSession,
-        headers: dict,
-        slug: str,
-        name: str,
-        version: str,
-        url: str,
-    ) -> None:
-        """Stream plain-text log lines from a Supervisor API log endpoint."""
-        extra = {"addon.slug": slug, "addon.name": name}
-        if version:
-            extra["addon.version"] = version
-        while True:
-            try:
-                async with session.get(
-                    url,
-                    headers={**headers, "Accept": "text/plain"},
-                    timeout=aiohttp.ClientTimeout(total=None, connect=10),
-                ) as resp:
-                    if resp.status == 404:
-                        log.debug("No log endpoint for %s (404) — skipping", slug)
-                        return
-                    if resp.status == 400:
-                        log.debug("Log stream %s: /follow unavailable (no journald) — polling /logs", slug)
-                        await self._poll_logs(session, headers, slug, name, version, url.split("/follow")[0])
-                        return
-                    if resp.status != 200:
-                        log.debug("Log stream %s: HTTP %d", slug, resp.status)
-                        await asyncio.sleep(LOG_RECONNECT_DELAY)
-                        continue
-                    async for raw_line in resp.content:
-                        line = raw_line.decode(errors="replace").rstrip()
-                        if line:
-                            m = _HA_LOG_RE.match(line)
-                            lvl = SEVERITY_MAP.get(m.group(1).upper(), logging.INFO) if m else logging.INFO
-                            _container_log.log(lvl, line, extra=extra)
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                log.debug("Log stream %s interrupted: %s", slug, exc)
-            await asyncio.sleep(LOG_RECONNECT_DELAY)
 
     async def _poll_logs(
         self,
@@ -599,7 +556,13 @@ class ContainerMonitor:
         version: str,
         url: str,
     ) -> None:
-        """Poll /logs for add-ons that don't support /logs/follow (no journald)."""
+        """Poll /logs periodically and emit only newly-appended lines.
+
+        Short-lived requests every LOG_POLL_INTERVAL — rather than a persistent
+        /logs/follow stream per service — keep the host journal gateway from
+        exhausting file descriptors when many add-ons are monitored.
+        _diff_log_lines dedups each poll against the previous one.
+        """
         extra = {"addon.slug": slug, "addon.name": name}
         if version:
             extra["addon.version"] = version
@@ -625,7 +588,7 @@ class ContainerMonitor:
                 return
             except Exception as exc:
                 log.debug("Poll logs %s error: %s", slug, exc)
-            await asyncio.sleep(STATS_INTERVAL)
+            await asyncio.sleep(LOG_POLL_INTERVAL)
 
     async def _poll_stats(
         self,
