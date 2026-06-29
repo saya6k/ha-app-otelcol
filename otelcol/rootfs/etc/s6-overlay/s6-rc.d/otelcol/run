@@ -9,7 +9,7 @@
 
 declare raw_config log_level otlp_endpoint otlp_protocol otlp_tls_insecure
 declare exporter_name endpoint headers_yaml pipeline_exporters otelcol_log_level
-declare filter_severity debug_log_processors metrics_processors slug validation_output
+declare filter_severity_const debug_log_processors metrics_processors slug validation_output
 declare -a options
 
 ## Bundled self-monitoring baseline — always loaded first
@@ -81,19 +81,20 @@ else
     # The OTLP backend pipeline (logs/bridge) is unfiltered so all records
     # reach the backend. The debug exporter pipeline (logs/debug) is filtered
     # so the add-on log panel respects log_level.
-    # OTLP ranges: TRACE=1-4, DEBUG=5-8, INFO=9-12, WARN=13-16, ERROR=17-20,
-    # FATAL=21-24. 0 means no filter (pass everything).
+    # otelcol 0.154 OTTL requires the context-prefixed path and the named
+    # severity constant: `log.severity_number < SEVERITY_NUMBER_INFO`.
+    # An empty constant means "no filter" (pass everything, e.g. trace).
     case "${log_level}" in
-        trace)           filter_severity=0  ;;
-        debug)           filter_severity=5  ;;
-        info|notice)     filter_severity=9  ;;
-        warning)         filter_severity=13 ;;
-        error)           filter_severity=17 ;;
-        fatal)           filter_severity=21 ;;
-        *)               filter_severity=9  ;;
+        trace)           filter_severity_const=""                    ;;
+        debug)           filter_severity_const="SEVERITY_NUMBER_DEBUG" ;;
+        info|notice)     filter_severity_const="SEVERITY_NUMBER_INFO"  ;;
+        warning)         filter_severity_const="SEVERITY_NUMBER_WARN"  ;;
+        error)           filter_severity_const="SEVERITY_NUMBER_ERROR" ;;
+        fatal)           filter_severity_const="SEVERITY_NUMBER_FATAL" ;;
+        *)               filter_severity_const="SEVERITY_NUMBER_INFO"  ;;
     esac
 
-    if [[ "${filter_severity}" -gt 0 ]]; then
+    if [[ -n "${filter_severity_const}" ]]; then
         debug_log_processors="[memory_limiter, transform/semconv_logs, filter/severity, batch]"
     else
         debug_log_processors="[memory_limiter, transform/semconv_logs, batch]"
@@ -128,11 +129,11 @@ processors:
   batch:
 YAML
 
-        if [[ "${filter_severity}" -gt 0 ]]; then
+        if [[ -n "${filter_severity_const}" ]]; then
             printf '  filter/severity:\n'
             printf '    logs:\n'
             printf '      log_record:\n'
-            printf "        - 'severity_number < %d'\n" "${filter_severity}"
+            printf "        - 'log.severity_number < %s'\n" "${filter_severity_const}"
         fi
 
         # Semconv log-record renames — applied on both log pipelines.
