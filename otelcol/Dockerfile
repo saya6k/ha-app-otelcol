@@ -7,7 +7,7 @@ ARG BUILD_ARCH=amd64
 # The plain (un-suffixed) tag is a multi-arch manifest — BuildKit resolves
 # amd64 / arm64 automatically from the build platform, same pattern used by
 # other add-ons in this repo.
-FROM ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.154.0 AS otelcol-binary
+FROM ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.155.0 AS otelcol-binary
 
 # ── Final stage ───────────────────────────────────────────────────────
 FROM ${BUILD_FROM}
