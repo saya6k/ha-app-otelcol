@@ -584,6 +584,11 @@ class ContainerMonitor:
                         text = await resp.text(errors="replace")
                         current = [l.rstrip() for l in text.splitlines() if l.rstrip()]
                         for line in _diff_log_lines(last_lines, current):
+                            # Skip Supervisor's access-log entries for our own
+                            # polling — otherwise every /logs and /stats request
+                            # we make is logged by the API and re-ingested here.
+                            if f"access from {_SELF_SLUG}" in line:
+                                continue
                             m = _HA_LOG_RE.match(line)
                             lvl = SEVERITY_MAP.get(m.group(1).upper(), logging.INFO) if m else logging.INFO
                             _container_log.log(lvl, line, extra=extra)
