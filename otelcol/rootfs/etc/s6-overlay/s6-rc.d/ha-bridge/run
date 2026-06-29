@@ -17,7 +17,7 @@ export CONTAINER_LOGS_ENABLED
 HA_METRICS_ENABLED=$(bashio::config 'ha_metrics_enabled')
 HA_EVENTS_ENABLED=$(bashio::config 'ha_events_enabled')
 HA_TRACES_ENABLED=$(bashio::config 'ha_traces_enabled')
-HA_TRACE_EVENTS=$(bashio::config 'ha_trace_events' | jq -r 'if type=="array" then .[] else . end' | paste -sd, -)
+HA_TRACE_EVENTS=$(bashio::config 'ha_trace_events' | paste -sd, -)
 HA_LOGS_ENABLED=$(bashio::config 'ha_logs_enabled')
 CONTAINER_LOGS_ENABLED=$(bashio::config 'container_logs_enabled')
 
