@@ -117,7 +117,7 @@ harmless — the bridge receives no `system_log_event` messages.
 ## Container logs and stats (`container_logs_enabled`)
 
 When enabled, the bridge enumerates all add-ons via the Supervisor API and
-streams logs + polls CPU/memory stats for each one (plus the Supervisor and HA
+polls logs + CPU/memory stats for each one (plus the Supervisor and HA
 Core). Each add-on's logs and stats are attributed to its own `service.name`
 (see [How telemetry is attributed](#how-telemetry-is-attributed-servicename)).
 
