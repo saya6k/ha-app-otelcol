@@ -144,14 +144,14 @@ YAML
     log_statements:
       - context: log
         statements:
-          - set(attributes["code.namespace"], attributes["ha.logger"]) where attributes["ha.logger"] != nil
-          - delete_key(attributes, "ha.logger")
-          - set(attributes["code.filepath"], attributes["ha.source"]) where attributes["ha.source"] != nil
-          - delete_key(attributes, "ha.source")
-          - set(attributes["ha.log.count"], attributes["ha.count"]) where attributes["ha.count"] != nil
-          - delete_key(attributes, "ha.count")
-          - set(attributes["ha.log.first_occurred"], attributes["ha.first_occurred"]) where attributes["ha.first_occurred"] != nil
-          - delete_key(attributes, "ha.first_occurred")
+          - set(log.attributes["code.namespace"], log.attributes["ha.logger"]) where log.attributes["ha.logger"] != nil
+          - delete_key(log.attributes, "ha.logger")
+          - set(log.attributes["code.filepath"], log.attributes["ha.source"]) where log.attributes["ha.source"] != nil
+          - delete_key(log.attributes, "ha.source")
+          - set(log.attributes["ha.log.count"], log.attributes["ha.count"]) where log.attributes["ha.count"] != nil
+          - delete_key(log.attributes, "ha.count")
+          - set(log.attributes["ha.log.first_occurred"], log.attributes["ha.first_occurred"]) where log.attributes["ha.first_occurred"] != nil
+          - delete_key(log.attributes, "ha.first_occurred")
 YAML
 
         # Per-service resource split — backend pipelines only.
@@ -166,17 +166,17 @@ YAML
           - set(resource.attributes["service.name"], resource.attributes["addon.slug"]) where resource.attributes["addon.slug"] != nil
           - set(resource.attributes["service.name"], "homeassistant") where resource.attributes["addon.slug"] == "core"
           - set(resource.attributes["service.name"], "supervisor") where resource.attributes["addon.slug"] == "supervisor"
-          - set(resource.attributes["service.version"], attributes["addon.version"]) where attributes["addon.version"] != nil
-          - set(resource.attributes["addon.name"], attributes["addon.name"]) where attributes["addon.name"] != nil
+          - set(resource.attributes["service.version"], log.attributes["addon.version"]) where log.attributes["addon.version"] != nil
+          - set(resource.attributes["addon.name"], log.attributes["addon.name"]) where log.attributes["addon.name"] != nil
     metric_statements:
       - context: resource
         statements:
-          - set(attributes["service.name"], attributes["addon.slug"]) where attributes["addon.slug"] != nil
-          - set(attributes["service.name"], "homeassistant") where attributes["addon.slug"] == "core"
-          - set(attributes["service.name"], "supervisor") where attributes["addon.slug"] == "supervisor"
+          - set(resource.attributes["service.name"], resource.attributes["addon.slug"]) where resource.attributes["addon.slug"] != nil
+          - set(resource.attributes["service.name"], "homeassistant") where resource.attributes["addon.slug"] == "core"
+          - set(resource.attributes["service.name"], "supervisor") where resource.attributes["addon.slug"] == "supervisor"
       - context: datapoint
         statements:
-          - set(resource.attributes["service.version"], attributes["addon.version"]) where attributes["addon.version"] != nil
+          - set(resource.attributes["service.version"], datapoint.attributes["addon.version"]) where datapoint.attributes["addon.version"] != nil
 YAML
         fi
 
