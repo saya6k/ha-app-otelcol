@@ -51,6 +51,7 @@ HA_EVENTS_ENABLED = os.environ.get("HA_EVENTS_ENABLED", "true").lower() == "true
 HA_TRACES_ENABLED = os.environ.get("HA_TRACES_ENABLED", "true").lower() == "true"
 HA_LOGS_ENABLED = os.environ.get("HA_LOGS_ENABLED", "true").lower() == "true"
 CONTAINER_LOGS_ENABLED = os.environ.get("CONTAINER_LOGS_ENABLED", "false").lower() == "true"
+HA_TRACE_EVENTS_RAW = os.environ.get("HA_TRACE_EVENTS", "")
 
 SUPERVISOR_BASE_URL = "http://supervisor"
 STATS_INTERVAL = 30       # seconds between stats polls
@@ -631,8 +632,8 @@ class ContainerMonitor:
 
 _container_monitor = ContainerMonitor()
 
-# Trace-eligible event types
-_TRACE_EVENTS = {
+# All known trace-eligible event types (reference set for validation).
+_ALL_TRACE_EVENTS = {
     "call_service",
     "automation_triggered",
     "script_started",
@@ -644,6 +645,18 @@ _TRACE_EVENTS = {
     "persistent_notifications_updated",
     "device_registry_updated",
 }
+
+# Configurable set of event types that generate trace spans.
+# Controlled by the ha_trace_events HA add-on option.
+_raw = HA_TRACE_EVENTS_RAW.strip()
+if _raw:
+    _ha_trace_events = {e.strip() for e in _raw.split(",") if e.strip()}
+    _unknown = _ha_trace_events - _ALL_TRACE_EVENTS
+    if _unknown:
+        log.warning("Unknown trace event types in HA_TRACE_EVENTS (allowed): %s", sorted(_unknown))
+else:
+    _ha_trace_events = _ALL_TRACE_EVENTS.copy()
+    log.info("HA_TRACE_EVENTS empty — using all %d known event types", len(_ha_trace_events))
 
 # Lifecycle/registry events also forwarded as OTLP log records
 _LIFECYCLE_LOG_EVENTS = {
@@ -762,7 +775,7 @@ async def _event_loop(ws: aiohttp.ClientWebSocketResponse) -> None:
         elif event_type in _LIFECYCLE_LOG_EVENTS:
             handle_lifecycle_log(event_type, event_data)
 
-        if event_type in _TRACE_EVENTS:
+        if event_type in _ha_trace_events:
             handle_trace_event(event_type, event_data, context)
 
 
@@ -809,7 +822,8 @@ async def run() -> None:
                         await _seed_states(session)
 
                         msg_id = 1
-                        if HA_METRICS_ENABLED or HA_TRACES_ENABLED:
+                        # state_changed: always needed for metrics; conditionally for traces
+                        if HA_METRICS_ENABLED or (HA_TRACES_ENABLED and "state_changed" in _ha_trace_events):
                             await _subscribe(ws, msg_id, "state_changed")
                             msg_id += 1
                         if HA_EVENTS_ENABLED:
@@ -818,15 +832,18 @@ async def run() -> None:
                         if HA_TRACES_ENABLED:
                             for etype in ("call_service", "automation_triggered",
                                           "script_started", "timer_finished"):
-                                await _subscribe(ws, msg_id, etype)
-                                msg_id += 1
-                        if HA_TRACES_ENABLED or HA_EVENTS_ENABLED:
-                            for etype in (
-                                "homeassistant_start", "homeassistant_stop",
-                                "component_loaded",
-                                "persistent_notifications_updated",
-                                "device_registry_updated",
-                            ):
+                                if etype in _ha_trace_events:
+                                    await _subscribe(ws, msg_id, etype)
+                                    msg_id += 1
+                        # Dual events: subscribed for log records (HA_EVENTS_ENABLED)
+                        # or for trace spans (HA_TRACES_ENABLED + in filter)
+                        for etype in (
+                            "homeassistant_start", "homeassistant_stop",
+                            "component_loaded",
+                            "persistent_notifications_updated",
+                            "device_registry_updated",
+                        ):
+                            if HA_EVENTS_ENABLED or (HA_TRACES_ENABLED and etype in _ha_trace_events):
                                 await _subscribe(ws, msg_id, etype)
                                 msg_id += 1
 
