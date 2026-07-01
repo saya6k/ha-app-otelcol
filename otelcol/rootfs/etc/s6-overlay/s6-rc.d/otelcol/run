@@ -72,9 +72,16 @@ else
         pipeline_exporters="[debug]"
     fi
 
-    # ── Warn about not-yet-implemented toggles ──────────────────────────────
+    # ── Host metrics (opt-in) ──────────────────────────────────────────────
+    # The hostmetrics receiver reads /proc and /sys. In a HA add-on container
+    # /proc/stat, /proc/meminfo, /proc/loadavg and /proc/diskstats already
+    # reflect the HOST, and the bind-mounted /config, /share, /data filesystems
+    # reflect the host data partition — so CPU/memory/load/disk/filesystem are
+    # meaningful without any privilege escalation. The network scraper is
+    # omitted because without host_network it would only see the add-on's own
+    # network namespace, not the host.
     if bashio::config.true 'host_metrics_enabled'; then
-        bashio::log.warning 'host_metrics_enabled is not yet implemented; ignored'
+        bashio::log.info 'Host metrics enabled — adding hostmetrics receiver'
     fi
 
     # ── Log severity filter (debug exporter only) ──────────────────────────
@@ -121,6 +128,28 @@ receivers:
         endpoint: "0.0.0.0:4318"
 YAML
 
+        # hostmetrics receiver — opt-in host CPU/memory/load/disk/filesystem.
+        # No network scraper (container netns only). exclude_fs_types drops the
+        # container overlay/virtual filesystems so only real partitions report.
+        if bashio::config.true 'host_metrics_enabled'; then
+            cat <<'YAML'
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      load:
+      memory:
+      disk:
+      filesystem:
+        exclude_fs_types:
+          match_type: strict
+          fs_types: [autofs, binfmt_misc, bpf, cgroup, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs, mqueue, nsfs, overlay, proc, procfs, pstore, romfs, rpc_pipefs, securityfs, selinuxfs, squashfs, sysfs, tracefs, tmpfs]
+        exclude_mount_points:
+          match_type: regexp
+          mount_points: [/dev/.*, /proc/.*, /sys/.*, /run/.*, /var/lib/docker/.*]
+YAML
+        fi
+
         cat <<YAML
 
 processors:
@@ -130,6 +159,20 @@ processors:
     spike_limit_percentage: 25
   batch:
 YAML
+
+        # Attribute host metrics to a dedicated service under the HA namespace.
+        if bashio::config.true 'host_metrics_enabled'; then
+            cat <<'YAML'
+  resource/host:
+    attributes:
+      - key: service.name
+        value: homeassistant-host
+        action: upsert
+      - key: service.namespace
+        value: home-assistant
+        action: upsert
+YAML
+        fi
 
         if [[ -n "${filter_severity_num}" ]]; then
             printf '  filter/severity:\n'
@@ -226,6 +269,18 @@ service:
       processors: ${metrics_processors}
       exporters: ${pipeline_exporters}
 YAML
+
+        # metrics/host: hostmetrics → backend (opt-in). resource/host tags the
+        # service.name; kept separate from metrics/bridge so add-on service
+        # splitting doesn't rewrite the host resource attributes.
+        if bashio::config.true 'host_metrics_enabled'; then
+            cat <<YAML
+    metrics/host:
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resource/host, batch]
+      exporters: ${pipeline_exporters}
+YAML
+        fi
 
         # logs/bridge: per-service split, OTLP backend only (omitted when no endpoint)
         if [[ -n "${otlp_endpoint}" ]]; then
