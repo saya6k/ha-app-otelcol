@@ -62,7 +62,7 @@ HA WebSocket API:
 HA REST /api/states      ──→ gauge seed + entity domain map on connect
 Supervisor API (opt-in):
   /addons/*/logs         ──→ OTLP logs    (tagged addon.slug / addon.name)
-  /addons/*/stats        ──→ OTLP gauges  (CPU % / memory %)
+  /addons/*/stats        ──→ OTLP metrics (CPU%, mem%/bytes, net + block I/O)
         │
         │  OTLP/HTTP  localhost:4318
         ▼
@@ -70,6 +70,7 @@ Supervisor API (opt-in):
 Receivers:
   otlp            ← bridge signals + external add-on SDKs (4317 gRPC / 4318 HTTP)
   filelog/ha      ← /config/home-assistant.log (multiline + severity mapping)
+  hostmetrics     ← host CPU/mem/load/disk/filesystem (opt-in, no network)
   prometheus/int  ← localhost:8888 (self-metrics)
 Processors: memory_limiter → batch → resource (ha.addon.version tag)
 Exporters:  otlp[http]/lgtm  +  debug

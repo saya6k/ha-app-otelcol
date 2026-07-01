@@ -123,6 +123,14 @@ _gauge_values: dict[str, float] = {}
 _registered_gauges: set[str] = set()
 # entity_id → domain slug; populated by seed + state_changed; drives ha.entity.count
 _entity_domains: dict[str, str] = {}
+# entity_id → integration platform (e.g. "matter", "zha"); populated by _seed_entity_registry
+_entity_platforms: dict[str, str] = {}
+# entity_id → device_id; populated by _seed_entity_registry
+_entity_device: dict[str, str] = {}
+# device_id → {name, area_id, manufacturer, model}; populated by _seed_device_registry
+_device_info: dict[str, dict] = {}
+# area_id → area_name; populated by _seed_area_registry
+_area_names: dict[str, str] = {}
 
 # OTel requires unit to be ASCII, max 63 chars. Map common HA non-ASCII units
 # to their UCUM equivalents; fall back to stripping non-ASCII.
@@ -144,10 +152,25 @@ def _sanitize_unit(unit: str) -> str:
 def _make_gauge_callback(entity_id: str):
     def callback(options):
         if entity_id in _gauge_values:
-            yield Observation(
-                _gauge_values[entity_id],
-                {"entity_id": entity_id},
-            )
+            attrs: dict[str, str] = {"entity_id": entity_id}
+            platform = _entity_platforms.get(entity_id)
+            if platform:
+                attrs["ha.platform"] = platform
+            device_id = _entity_device.get(entity_id)
+            if device_id:
+                info = _device_info.get(device_id, {})
+                if info.get("name"):
+                    attrs["ha.device_name"] = info["name"]
+                area_id = info.get("area_id", "")
+                if area_id:
+                    area = _area_names.get(area_id, "")
+                    if area:
+                        attrs["ha.area_name"] = area
+                if info.get("manufacturer"):
+                    attrs["ha.manufacturer"] = info["manufacturer"]
+                if info.get("model"):
+                    attrs["ha.model"] = info["model"]
+            yield Observation(_gauge_values[entity_id], attrs)
     return callback
 
 
@@ -164,10 +187,15 @@ def _upsert_gauge(entity_id: str, value: float, attrs: dict[str, str]) -> None:
         )
 
 
-# ── Container stats gauges (E) ────────────────────────────────────────────────
-# Keyed by slug (add-on slug, "supervisor", or "core"); updated by ContainerMonitor.
-_container_cpu: dict[str, float] = {}
-_container_mem: dict[str, float] = {}
+# ── Container stats (E) ───────────────────────────────────────────────────────
+# slug → {field: value}; updated by ContainerMonitor._poll_stats. Keyed by slug
+# (add-on slug, "supervisor", or "core").
+_container_stats: dict[str, dict[str, float]] = {}
+# Numeric fields read from each Supervisor /stats payload.
+_STAT_FIELDS = (
+    "cpu_percent", "memory_percent", "memory_usage",
+    "network_rx", "network_tx", "blk_read", "blk_write",
+)
 # slug → add-on version; populated by ContainerMonitor._enumerate_services.
 _addon_versions: dict[str, str] = {}
 
@@ -180,28 +208,43 @@ def _stat_attrs(slug: str) -> dict[str, str]:
     return attrs
 
 
-def _container_cpu_callback(options: Any):
-    for slug, value in _container_cpu.items():
-        yield Observation(value, _stat_attrs(slug))
+def _make_stat_callback(field: str):
+    def callback(options: Any):
+        for slug, stats in _container_stats.items():
+            if field in stats:
+                yield Observation(stats[field], _stat_attrs(slug))
+    return callback
 
 
-def _container_mem_callback(options: Any):
-    for slug, value in _container_mem.items():
-        yield Observation(value, _stat_attrs(slug))
+# Point-in-time gauges.
+for _name, _field, _unit, _desc in (
+    ("supervisor.addon.cpu_percent", "cpu_percent", "%",
+     "CPU usage percent per add-on/service"),
+    ("supervisor.addon.memory_percent", "memory_percent", "%",
+     "Memory usage percent per add-on/service"),
+    ("supervisor.addon.memory_usage_bytes", "memory_usage", "By",
+     "Memory usage in bytes per add-on/service"),
+):
+    _meter.create_observable_gauge(
+        name=_name, callbacks=[_make_stat_callback(_field)],
+        unit=_unit, description=_desc,
+    )
 
-
-_meter.create_observable_gauge(
-    name="supervisor.addon.cpu_percent",
-    callbacks=[_container_cpu_callback],
-    unit="%",
-    description="CPU usage percent per add-on/service",
-)
-_meter.create_observable_gauge(
-    name="supervisor.addon.memory_percent",
-    callbacks=[_container_mem_callback],
-    unit="%",
-    description="Memory usage percent per add-on/service",
-)
+# Cumulative byte counters (totals since container start; graph with rate()).
+for _name, _field, _desc in (
+    ("supervisor.addon.network_rx_bytes", "network_rx",
+     "Cumulative network bytes received per add-on/service"),
+    ("supervisor.addon.network_tx_bytes", "network_tx",
+     "Cumulative network bytes transmitted per add-on/service"),
+    ("supervisor.addon.blk_read_bytes", "blk_read",
+     "Cumulative block-device bytes read per add-on/service"),
+    ("supervisor.addon.blk_write_bytes", "blk_write",
+     "Cumulative block-device bytes written per add-on/service"),
+):
+    _meter.create_observable_counter(
+        name=_name, callbacks=[_make_stat_callback(_field)],
+        unit="By", description=_desc,
+    )
 
 # ── Entity domain count ───────────────────────────────────────────────────────
 
@@ -607,7 +650,7 @@ class ContainerMonitor:
         slug: str,
         url: str,
     ) -> None:
-        """Poll stats endpoint and update the shared gauge dicts."""
+        """Poll stats endpoint and update the shared stats dict."""
         while True:
             try:
                 async with session.get(
@@ -616,8 +659,9 @@ class ContainerMonitor:
                 ) as resp:
                     if resp.status == 200:
                         data = (await resp.json()).get("data", {})
-                        _container_cpu[slug] = float(data.get("cpu_percent", 0.0))
-                        _container_mem[slug] = float(data.get("memory_percent", 0.0))
+                        _container_stats[slug] = {
+                            f: float(data.get(f) or 0.0) for f in _STAT_FIELDS
+                        }
                     elif resp.status == 404:
                         log.debug("No stats endpoint for %s (404) — skipping", slug)
                         return
@@ -753,6 +797,90 @@ async def _seed_states(session: aiohttp.ClientSession) -> None:
         log.warning("State seed error: %s", exc)
 
 
+async def _seed_entity_registry(session: aiohttp.ClientSession) -> None:
+    """Seed entity_id → platform mapping from HA entity registry."""
+    if not HA_METRICS_ENABLED:
+        return
+    headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
+    try:
+        async with session.get(
+            f"{HA_REST_URL}/config/entity_registry",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status != 200:
+                log.warning("Failed to seed entity registry: HTTP %d", resp.status)
+                return
+            entries = await resp.json()
+        for entry in entries:
+            eid = entry.get("entity_id", "")
+            if not eid:
+                continue
+            platform = entry.get("platform", "")
+            if platform:
+                _entity_platforms[eid] = platform
+            device_id = entry.get("device_id", "")
+            if device_id:
+                _entity_device[eid] = device_id
+        log.info("Seeded %d entity platform mappings", len(_entity_platforms))
+    except Exception as exc:
+        log.warning("Entity registry seed error: %s", exc)
+
+
+async def _seed_device_registry(session: aiohttp.ClientSession) -> None:
+    """Seed device_id → {name, area_id, manufacturer, model} mapping."""
+    if not HA_METRICS_ENABLED:
+        return
+    headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
+    try:
+        async with session.get(
+            f"{HA_REST_URL}/config/device_registry",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status != 200:
+                log.warning("Failed to seed device registry: HTTP %d", resp.status)
+                return
+            entries = await resp.json()
+        for entry in entries:
+            did = entry.get("id", "")
+            if did:
+                _device_info[did] = {
+                    "name": entry.get("name_by_user") or entry.get("name") or "",
+                    "area_id": entry.get("area_id") or "",
+                    "manufacturer": entry.get("manufacturer") or "",
+                    "model": entry.get("model") or "",
+                }
+        log.info("Seeded %d device entries", len(_device_info))
+    except Exception as exc:
+        log.warning("Device registry seed error: %s", exc)
+
+
+async def _seed_area_registry(session: aiohttp.ClientSession) -> None:
+    """Seed area_id → area_name mapping."""
+    if not HA_METRICS_ENABLED:
+        return
+    headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
+    try:
+        async with session.get(
+            f"{HA_REST_URL}/config/area_registry",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status != 200:
+                log.warning("Failed to seed area registry: HTTP %d", resp.status)
+                return
+            entries = await resp.json()
+        for entry in entries:
+            aid = entry.get("area_id", "")
+            name = entry.get("name", "")
+            if aid and name:
+                _area_names[aid] = name
+        log.info("Seeded %d area entries", len(_area_names))
+    except Exception as exc:
+        log.warning("Area registry seed error: %s", exc)
+
+
 async def _event_loop(ws: aiohttp.ClientWebSocketResponse) -> None:
     """Process incoming WebSocket messages."""
     async for msg in ws:
@@ -819,7 +947,12 @@ async def run() -> None:
                         if not await _authenticate(ws):
                             raise RuntimeError("Authentication failed")
 
-                        await _seed_states(session)
+                        await asyncio.gather(
+                            _seed_states(session),
+                            _seed_entity_registry(session),
+                            _seed_device_registry(session),
+                            _seed_area_registry(session),
+                        )
 
                         msg_id = 1
                         # state_changed: always needed for metrics; conditionally for traces

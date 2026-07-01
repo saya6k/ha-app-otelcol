@@ -44,6 +44,9 @@ COPY rootfs /
 RUN find /etc/s6-overlay/s6-rc.d -type f \( -name run -o -name finish -o -name up -o -name down \) -exec chmod +x {} \; \
     && chmod +x /usr/bin/ha-otel-bridge
 
+# Probe the health_check extension (bundled self-monitoring config binds it to
+# :13133). The previous `otelcol-contrib ... healthcheck` branch relied on the
+# component.UseLocalHostAsDefaultHost feature gate, which no longer exists in
+# 0.155.0 and made that branch always error — the HTTP probe is what worked.
 HEALTHCHECK --start-period=10s --interval=5m --timeout=3s --retries=3 \
-    CMD /usr/bin/otelcol-contrib --feature-gates=-component.UseLocalHostAsDefaultHost healthcheck 2>/dev/null || \
-        wget -qO- http://localhost:13133/ >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://localhost:13133/ >/dev/null 2>&1 || exit 1
