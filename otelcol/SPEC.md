@@ -415,14 +415,31 @@ The HA default profile works for all other apps because they don't use `/opt/`. 
 
 ### 11.2 What the Profile Must Cover
 
-> **Shipped profile:** `otelcol/apparmor.txt` grants file access with a single
-> blanket `file,` rule, not the per-path rules below. This table is kept as a
-> reference of *which paths the workload actually touches* — not the literal
-> ruleset. Real confinement is delivered by the capability set, the `network`
-> rules, and the explicit `deny /var/run/docker.sock`; the file layer is left
-> open because the container's mount set (defined by the Supervisor) is the
-> effective boundary. The `/proc/**` and `/sys/**` reads that `hostmetrics`
-> relies on are therefore permitted by the blanket rule.
+> **Shipped profile:** `otelcol/apparmor.txt` enforces per-path least
+> privilege — there is no blanket `file,` rule. The table below is close to the
+> literal ruleset, with one deliberate relaxation: reads and `mmap` on the
+> system trees (`/usr/lib`, `/lib`, `/usr/share`, `/etc`, `/proc`, `/sys`) are
+> granted broadly. Reads are not the threat model, and narrowing them is the
+> main source of AppArmor denials; confinement comes from *writes* being
+> confined to `/data`, `/share`, `/addon_config`, `/tmp`, `/run`, and
+> `owner /proc/self`, executes staying under this profile (`ix`, no
+> transition), `/config` and `/ssl` being read-only, the explicit
+> `deny /var/run/docker.sock`, and the restricted `network` set. No `capability`
+> rules are granted — the workload runs without any (verified at runtime), so
+> AppArmor denies all capabilities. The `/proc/**` and `/sys/**` reads that
+> `hostmetrics` relies on are permitted by the `/proc/** r` / `/sys/** r` rules.
+>
+> **Staged rollout (current state):** the profile is parsed by the HAOS kernel
+> when the add-on starts, so `docker build` and CI cannot catch denials — only
+> its *syntax* is validated locally (`apparmor_parser -Q`, which compiles the
+> policy without loading it). It therefore **ships in `complain` mode**
+> (`flags=(attach_disconnected,mediate_deleted,complain)`): the kernel logs
+> denials but does not enforce them, so a missed path cannot break the add-on.
+> To promote to enforce: start the add-on, exercise every option (host metrics,
+> container logs, a real `otlp_endpoint`), check the host for denials with
+> `dmesg | grep -i 'apparmor.*DENIED'` or `journalctl -k | grep audit`, add any
+> denied path, then drop `complain`. Rollback is `apparmor: false` in
+> `config.yaml`.
 
 | Path | Permission | Reason |
 |------|-----------|--------|
