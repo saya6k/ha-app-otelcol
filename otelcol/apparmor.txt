@@ -1,83 +1,54 @@
 #include <tunables/global>
 
-# Staged rollout: shipped in `complain` mode — the kernel logs denials but does
-# not enforce them, so a missed path cannot break the add-on. After verifying no
-# denials on real HAOS (`dmesg | grep -i 'apparmor.*DENIED'`), drop `complain` to
-# enforce. See SPEC §11.2.
-profile hassio_otelcol flags=(attach_disconnected,mediate_deleted,complain) {
+profile hassio_otelcol flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
 
-  # Signals — s6-supervise manages its children.
+  # Capabilities
+  file,
   signal (send) set=(kill,term,int,hup,cont),
 
-  # ── System libraries and interpreters (read + mmap only, never write) ──
-  # musl loader, libpython, otelcol's own deps, Python C extensions.
-  /usr/lib/** mr,
-  /usr/local/lib/** mr,
-  /lib/** mr,
-  /usr/share/** r,
-
-  # ── Executables — run under THIS profile (ix, no transition) ───────────
-  /init mrix,
-  /bin/** mrix,
-  /usr/bin/** mrix,
-  /usr/local/bin/** mrix,
-  /sbin/** mrix,
-  /package/** mrix,
-  /command/** mrix,
-  /usr/lib/bashio/** rix,
-  /usr/bin/otelcol-contrib mrix,
-
-  # ── s6-overlay runtime ─────────────────────────────────────────────────
-  /etc/s6-overlay/** rix,
-  /etc/services.d/** rix,
-  /etc/cont-init.d/** rix,
-  /etc/cont-finish.d/** rix,
+  # S6-Overlay (official HA example pattern)
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
   /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
   /run/ rwk,
   /run/** rwk,
+  /dev/tty rw,
 
-  # ── System configuration (read-only): resolv.conf, ca-certs, os-release,
-  #    bundled otelcol config, s6 definitions ──────────────────────────────
-  /etc/** r,
-
-  # ── Python bridge venv (/opt/bridge-venv — outside standard abstractions)
-  /opt/bridge-venv/** mr,
-  /opt/bridge-venv/bin/* mrix,
-
-  # ── Generated collector config + scratch ───────────────────────────────
+  # Bashio
+  /usr/lib/bashio/** ix,
   /tmp/ rwk,
   /tmp/** rwk,
 
-  # ── HA add-on data and mounts ──────────────────────────────────────────
-  # /config and /ssl are read-only mounts; keep them read-only here too.
+  # otelcol-contrib binary
+  /usr/bin/otelcol-contrib ix,
+
+  # Python bridge venv (/opt/bridge-venv — non-standard path, not covered by abstractions)
+  /opt/bridge-venv/bin/python3* ix,
+
+  # HA add-on data and mounts
   /data/ rw,
   /data/** rw,
-  /config/ r,
-  /config/** r,
-  /ssl/ r,
-  /ssl/** r,
+  /config/ rw,
+  /config/** rw,
+  /ssl/ rw,
+  /ssl/** rw,
   /share/ rw,
   /share/** rw,
   /addon_config/ rw,
   /addon_config/** rw,
 
-  # ── Host metrics — hostmetrics reads /proc and /sys. Go and Python read
-  #    their own /proc entries (owner rw); everything else is read-only. ──
-  /proc/ r,
-  /proc/** r,
-  owner /proc/** rw,
-  /sys/** r,
-
-  # ── Devices (abstractions/base covers null/zero/random/urandom) ────────
-  /dev/tty rw,
-  owner /dev/pts/* rw,
-
-  # Deny Docker socket — Supervisor API is used instead.
+  # Deny Docker socket — Supervisor API is used instead
   deny /var/run/docker.sock rwklx,
   deny /run/docker.sock rwklx,
 
-  # Network (OTLP export, DNS, HA API) — inet/inet6/unix only, no netlink.
+  # Network (OTLP export, DNS, HA API)
   network inet  stream,
   network inet  dgram,
   network inet6 stream,
