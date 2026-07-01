@@ -415,6 +415,15 @@ The HA default profile works for all other apps because they don't use `/opt/`. 
 
 ### 11.2 What the Profile Must Cover
 
+> **Shipped profile:** `otelcol/apparmor.txt` grants file access with a single
+> blanket `file,` rule, not the per-path rules below. This table is kept as a
+> reference of *which paths the workload actually touches* — not the literal
+> ruleset. Real confinement is delivered by the capability set, the `network`
+> rules, and the explicit `deny /var/run/docker.sock`; the file layer is left
+> open because the container's mount set (defined by the Supervisor) is the
+> effective boundary. The `/proc/**` and `/sys/**` reads that `hostmetrics`
+> relies on are therefore permitted by the blanket rule.
+
 | Path | Permission | Reason |
 |------|-----------|--------|
 | `/init` | `mrix` | s6-overlay entrypoint (Docker CMD) — was missing |
