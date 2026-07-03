@@ -15,6 +15,10 @@ declare -a options
 ## Bundled self-monitoring baseline — always loaded first
 options+=(--config="/etc/otelcol-contrib/otelcol-selfmonitoring.yaml")
 
+## Socket dir for the ha-otel-bridge <-> otelcol unix-socket receiver (below).
+## Created unconditionally so it exists under raw_config too.
+mkdir -p /run/otelcol
+
 raw_config=$(bashio::config 'raw_config')
 
 ## ── raw_config path ──────────────────────────────────────────────────────────
@@ -126,6 +130,14 @@ receivers:
         endpoint: "0.0.0.0:4317"
       http:
         endpoint: "0.0.0.0:4318"
+  # ha-otel-bridge only — gRPC over a unix socket instead of the TCP loopback
+  # HTTP receiver above, so bridge<->collector traffic on the same container
+  # doesn't get counted as container network I/O.
+  otlp/internal:
+    protocols:
+      grpc:
+        transport: unix
+        endpoint: /run/otelcol/otlp-grpc.sock
 YAML
 
         # hostmetrics receiver — opt-in host CPU/memory/load/disk/filesystem.
@@ -265,7 +277,7 @@ service:
       level: ${otelcol_log_level}
   pipelines:
     metrics/bridge:
-      receivers: [otlp]
+      receivers: [otlp, otlp/internal]
       processors: ${metrics_processors}
       exporters: ${pipeline_exporters}
 YAML
@@ -286,7 +298,7 @@ YAML
         if [[ -n "${otlp_endpoint}" ]]; then
             cat <<YAML
     logs/bridge:
-      receivers: [otlp]
+      receivers: [otlp, otlp/internal]
       processors: [memory_limiter, transform/semconv_logs, groupbyattrs/addon, transform/service_resource, batch]
       exporters: [${exporter_name}]
 YAML
@@ -295,14 +307,14 @@ YAML
         # logs/debug: semconv renames + severity filter, debug exporter only
         cat <<YAML
     logs/debug:
-      receivers: [otlp]
+      receivers: [otlp, otlp/internal]
       processors: ${debug_log_processors}
       exporters: [debug]
 YAML
 
         cat <<YAML
     traces/bridge:
-      receivers: [otlp]
+      receivers: [otlp, otlp/internal]
       processors: [memory_limiter, batch]
       exporters: ${pipeline_exporters}
 YAML

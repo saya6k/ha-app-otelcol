@@ -30,7 +30,7 @@ RUN apk add --no-cache python3 py3-pip \
         aiohttp \
         aiodns \
         opentelemetry-sdk \
-        opentelemetry-exporter-otlp-proto-http
+        opentelemetry-exporter-otlp-proto-grpc
 
 ENV PATH="/opt/bridge-venv/bin:${PATH}"
 
