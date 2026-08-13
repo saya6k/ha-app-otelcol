@@ -15,6 +15,7 @@ FROM ${BUILD_FROM}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 LABEL \
+    io.hass.type="app" \
     org.opencontainers.image.title="Home Assistant Add-on: OpenTelemetry Collector" \
     org.opencontainers.image.description="Collect logs, metrics, and traces from HA Core, Supervisor, and add-on containers. Export via OTLP to LGTM." \
     org.opencontainers.image.source="https://github.com/saya6k/ha-apps" \
