@@ -15,3 +15,8 @@ GEMINI.md
 .agents/
 .claude/
 .gemini/
+
+# Local pre-implementation design docs — not shipped, not tracked.
+**/SPEC*.md
+**/specs/
+**/tasks/
