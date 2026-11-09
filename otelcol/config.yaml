@@ -41,6 +41,15 @@ options:
   otlp_tls_insecure: false
   ha_logs_enabled: true
   ha_metrics_enabled: true
+  ha_state_filter:
+    include:
+      domains: []
+      entities: []
+      entity_globs: []
+    exclude:
+      domains: []
+      entities: []
+      entity_globs: []
   ha_events_enabled: true
   ha_traces_enabled: true
   ha_trace_events:
@@ -67,6 +76,21 @@ schema:
   otlp_tls_insecure: bool
   ha_logs_enabled: bool
   ha_metrics_enabled: bool
+  ha_state_filter:
+    include:
+      domains:
+        - str
+      entities:
+        - str
+      entity_globs:
+        - str
+    exclude:
+      domains:
+        - str
+      entities:
+        - str
+      entity_globs:
+        - str
   ha_events_enabled: bool
   ha_traces_enabled: bool
   ha_trace_events:

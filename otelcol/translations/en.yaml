@@ -39,6 +39,17 @@ configuration:
       Subscribe to Home Assistant state changes via the WebSocket API and
       export numeric entity states as OTLP metrics. No extra HA integration
       required.
+  ha_state_filter:
+    name: HA state metric filter
+    description: >-
+      Controls which numeric entities become `ha.state.<entity_id>` metrics,
+      using the same include/exclude shape as the HA Recorder integration
+      (`domains`, `entities`, `entity_globs`). An entity-level match always
+      wins; with no include rules, everything passes except what exclude
+      matches; with include rules set, only matching entities pass (still
+      subject to exclude). Use this to drop high-count, low-value entities
+      (e.g. per-channel view counters, per-dataset storage sensors) before
+      they become separate metrics. Empty by default (no filtering).
   ha_events_enabled:
     name: Collect HA events as logs
     description: >-

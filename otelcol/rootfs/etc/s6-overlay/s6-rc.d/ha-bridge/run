@@ -9,12 +9,29 @@ bashio::log.info 'Waiting for otelcol health check...'
 until wget -qO- http://localhost:13133/ >/dev/null 2>&1; do sleep 2; done
 
 export HA_METRICS_ENABLED
+export HA_STATE_INCLUDE_DOMAINS
+export HA_STATE_INCLUDE_ENTITIES
+export HA_STATE_INCLUDE_ENTITY_GLOBS
+export HA_STATE_EXCLUDE_DOMAINS
+export HA_STATE_EXCLUDE_ENTITIES
+export HA_STATE_EXCLUDE_ENTITY_GLOBS
 export HA_EVENTS_ENABLED
 export HA_TRACES_ENABLED
 export HA_TRACE_EVENTS
 export HA_LOGS_ENABLED
 export CONTAINER_LOGS_ENABLED
 HA_METRICS_ENABLED=$(bashio::config 'ha_metrics_enabled')
+# ha_state_filter.* mirrors the HA Recorder integration's include/exclude
+# config (domains / entities / entity_globs) — filters which numeric
+# entities become ha.state.<entity_id> metrics. bashio::config unwraps
+# list values to one raw element per line (see ha_trace_events below), so
+# join with commas the same way and split on "," in the bridge.
+HA_STATE_INCLUDE_DOMAINS=$(bashio::config 'ha_state_filter.include.domains' | paste -sd, -)
+HA_STATE_INCLUDE_ENTITIES=$(bashio::config 'ha_state_filter.include.entities' | paste -sd, -)
+HA_STATE_INCLUDE_ENTITY_GLOBS=$(bashio::config 'ha_state_filter.include.entity_globs' | paste -sd, -)
+HA_STATE_EXCLUDE_DOMAINS=$(bashio::config 'ha_state_filter.exclude.domains' | paste -sd, -)
+HA_STATE_EXCLUDE_ENTITIES=$(bashio::config 'ha_state_filter.exclude.entities' | paste -sd, -)
+HA_STATE_EXCLUDE_ENTITY_GLOBS=$(bashio::config 'ha_state_filter.exclude.entity_globs' | paste -sd, -)
 HA_EVENTS_ENABLED=$(bashio::config 'ha_events_enabled')
 HA_TRACES_ENABLED=$(bashio::config 'ha_traces_enabled')
 HA_TRACE_EVENTS=$(bashio::config 'ha_trace_events' | paste -sd, -)

@@ -14,6 +14,7 @@ container network I/O).
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -56,6 +57,25 @@ HA_TRACES_ENABLED = os.environ.get("HA_TRACES_ENABLED", "true").lower() == "true
 HA_LOGS_ENABLED = os.environ.get("HA_LOGS_ENABLED", "true").lower() == "true"
 CONTAINER_LOGS_ENABLED = os.environ.get("CONTAINER_LOGS_ENABLED", "false").lower() == "true"
 HA_TRACE_EVENTS_RAW = os.environ.get("HA_TRACE_EVENTS", "")
+
+
+def _load_csv_env(env_name: str) -> list[str]:
+    """Parse a comma-joined bashio list option (see HA_TRACE_EVENTS)."""
+    raw = os.environ.get(env_name, "").strip()
+    return [e.strip() for e in raw.split(",") if e.strip()] if raw else []
+
+
+# ha.state.<entity_id> metric filter — mirrors the HA Recorder integration's
+# include/exclude config (domains / entities / entity_globs).
+_HA_STATE_INCLUDE_DOMAINS = set(_load_csv_env("HA_STATE_INCLUDE_DOMAINS"))
+_HA_STATE_INCLUDE_ENTITIES = set(_load_csv_env("HA_STATE_INCLUDE_ENTITIES"))
+_HA_STATE_INCLUDE_ENTITY_GLOBS = _load_csv_env("HA_STATE_INCLUDE_ENTITY_GLOBS")
+_HA_STATE_EXCLUDE_DOMAINS = set(_load_csv_env("HA_STATE_EXCLUDE_DOMAINS"))
+_HA_STATE_EXCLUDE_ENTITIES = set(_load_csv_env("HA_STATE_EXCLUDE_ENTITIES"))
+_HA_STATE_EXCLUDE_ENTITY_GLOBS = _load_csv_env("HA_STATE_EXCLUDE_ENTITY_GLOBS")
+_HA_STATE_HAVE_INCLUDE = bool(
+    _HA_STATE_INCLUDE_DOMAINS or _HA_STATE_INCLUDE_ENTITIES or _HA_STATE_INCLUDE_ENTITY_GLOBS
+)
 
 SUPERVISOR_BASE_URL = "http://supervisor"
 STATS_INTERVAL = 30       # seconds between stats polls
@@ -178,7 +198,34 @@ def _make_gauge_callback(entity_id: str):
     return callback
 
 
+def _ha_state_metric_allowed(entity_id: str) -> bool:
+    """HA Recorder-style include/exclude filter for ha.state.* metrics.
+
+    Precedence: an explicit entity-level match (include or exclude) always
+    wins. Otherwise, if any include rule is configured, only entities whose
+    domain or entity_id matches an include rule pass (and can still be
+    vetoed by a domain/glob exclude); with no include rules, everything
+    passes except what an exclude rule matches.
+    """
+    if entity_id in _HA_STATE_INCLUDE_ENTITIES:
+        return True
+    if entity_id in _HA_STATE_EXCLUDE_ENTITIES:
+        return False
+    domain = entity_id.split(".", 1)[0]
+    excluded = domain in _HA_STATE_EXCLUDE_DOMAINS or any(
+        fnmatch.fnmatch(entity_id, pattern) for pattern in _HA_STATE_EXCLUDE_ENTITY_GLOBS
+    )
+    if _HA_STATE_HAVE_INCLUDE:
+        included = domain in _HA_STATE_INCLUDE_DOMAINS or any(
+            fnmatch.fnmatch(entity_id, pattern) for pattern in _HA_STATE_INCLUDE_ENTITY_GLOBS
+        )
+        return included and not excluded
+    return not excluded
+
+
 def _upsert_gauge(entity_id: str, value: float, attrs: dict[str, str]) -> None:
+    if not _ha_state_metric_allowed(entity_id):
+        return
     _gauge_values[entity_id] = value
     if entity_id not in _registered_gauges:
         _registered_gauges.add(entity_id)
